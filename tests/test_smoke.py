@@ -1,8 +1,5 @@
-from pathlib import Path
-import pandas as pd
-
-from metricguard.synthetic import generate_safety_dataset
 from metricguard.analysis import analyze_kpi_integrity
+from metricguard.synthetic import generate_safety_dataset
 
 
 def test_analyze_runs():
