@@ -7,10 +7,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12"]
     env:
       MPLBACKEND: Agg
@@ -25,4 +26,5 @@ jobs:
       - run: ruff format --check .
       - run: pytest -q
       - name: Benchmark (detection accuracy)
+        if: runner.os == 'Linux'
         run: python -m metricguard benchmark --seeds 0:30 >> "$GITHUB_STEP_SUMMARY"

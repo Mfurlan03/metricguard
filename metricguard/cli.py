@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from .pipeline import run_metricguard
@@ -8,6 +9,10 @@ from .synthetic import generate_productivity_dataset, generate_safety_dataset
 
 
 def main() -> None:
+    # Windows consoles and pipes often default to cp1252; never crash on a non-ASCII character.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     parser = argparse.ArgumentParser(prog="metricguard", description="MetricGuard CLI")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -80,7 +85,7 @@ def main() -> None:
             df = generate_productivity_dataset(periods=args.periods, seed=args.seed, mode=args.mode)
 
         df.to_csv(out_path, index=False)
-        print(f"✅ Wrote {args.scenario} dataset ({args.mode}) to: {out_path}")
+        print(f"Wrote {args.scenario} dataset ({args.mode}) to: {out_path}")
         return
 
     # run
@@ -110,4 +115,4 @@ def main() -> None:
         kpi_higher_better=kpi_hb,
         outcome_higher_better=out_hb,
     )
-    print(f"✅ Wrote report to: {out_path}")
+    print(f"Wrote report to: {out_path}")
