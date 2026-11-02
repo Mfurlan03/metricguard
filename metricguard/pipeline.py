@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 import pandas as pd
 
 from .analysis import analyze_kpi_integrity
-from .report import build_markdown_report, write_report
 from .plotting import save_basic_plot
+from .report import build_markdown_report, write_report
 
 
 def run_metricguard(
@@ -61,4 +62,5 @@ def run_metricguard(
             outcome_col=outcome_col,
             corr_series=result.corr_series,
             out_path=plot_path,
+            suspicious_window=result.suspicious_window,
         )

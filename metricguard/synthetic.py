@@ -3,8 +3,23 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+# Fraction of the series where gaming starts / stops, per scenario.
+# Exposed so evaluation code can score window localization against ground truth.
+GAMING_WINDOWS = {
+    "safety": (0.45, 0.70),
+    "productivity": (0.45, 0.75),
+}
 
-def generate_safety_dataset(periods: int = 52, seed: int = 7, mode: str = "gamed") -> pd.DataFrame:
+
+def gaming_window(scenario: str, periods: int) -> tuple[int, int]:
+    """Ground-truth gaming window (start, end-exclusive) row indices for a scenario."""
+    start_frac, end_frac = GAMING_WINDOWS[scenario]
+    return int(periods * start_frac), int(periods * end_frac)
+
+
+def generate_safety_dataset(
+    periods: int = 52, seed: int = 7, mode: str = "gamed", intensity: float = 1.0
+) -> pd.DataFrame:
     """
     Safety scenario:
     KPI: safety_score (higher better)
@@ -13,7 +28,9 @@ def generate_safety_dataset(periods: int = 52, seed: int = 7, mode: str = "gamed
 
     mode="clean": KPI improves and incidents fall.
     mode="gamed": KPI inflates while incidents plateau/worsen; contradictions rise.
+    intensity: scales the size of the gaming effect (0 = no gaming, 1 = default).
     """
+    _check_mode(mode)
     rng = np.random.default_rng(seed)
     t = np.arange(1, periods + 1)
 
@@ -31,25 +48,20 @@ def generate_safety_dataset(periods: int = 52, seed: int = 7, mode: str = "gamed
 
     if mode == "gamed":
         # KPI inflation window
-        gs = int(periods * 0.45)
-        ge = int(periods * 0.70)
+        gs, ge = gaming_window("safety", periods)
 
         inflation = np.zeros_like(t, dtype=float)
-        inflation[gs:ge] = np.linspace(0.00, 0.25, ge - gs)
+        inflation[gs:ge] = np.linspace(0.00, 0.25 * intensity, ge - gs)
         inflation[ge:] = inflation[ge - 1]
         safety_score = np.clip(safety_score + inflation, 0, 1)
 
         # outcome decouples and worsens during inflation (strong signal)
-        plateau = float(np.mean(incidents[gs - 6:gs]))
-        incidents[gs:ge] = (
-            plateau
-            + np.linspace(0.0, 2.0, ge - gs)
-            + rng.normal(0, 0.45, size=(ge - gs))
-        )
+        plateau = float(np.mean(incidents[gs - 6 : gs]))
+        incidents[gs:ge] = plateau + np.linspace(0.0, 2.0 * intensity, ge - gs) + rng.normal(0, 0.45, size=(ge - gs))
 
         # contradictions rise
-        near_misses[gs:ge] += np.linspace(0.0, 2.5, ge - gs)
-        overtime[gs:ge] += np.linspace(0.0, 10.0, ge - gs)
+        near_misses[gs:ge] += np.linspace(0.0, 2.5 * intensity, ge - gs)
+        overtime[gs:ge] += np.linspace(0.0, 10.0 * intensity, ge - gs)
 
     df = pd.DataFrame(
         {
@@ -63,7 +75,9 @@ def generate_safety_dataset(periods: int = 52, seed: int = 7, mode: str = "gamed
     return df
 
 
-def generate_productivity_dataset(periods: int = 52, seed: int = 11, mode: str = "gamed") -> pd.DataFrame:
+def generate_productivity_dataset(
+    periods: int = 52, seed: int = 11, mode: str = "gamed", intensity: float = 1.0
+) -> pd.DataFrame:
     """
     Productivity scenario:
     KPI: tickets_closed (higher better)
@@ -72,7 +86,9 @@ def generate_productivity_dataset(periods: int = 52, seed: int = 11, mode: str =
 
     mode="clean": tickets_closed rises while defects fall.
     mode="gamed": tickets_closed rises but defects/reopens rise (rush work).
+    intensity: scales the size of the gaming effect (0 = no gaming, 1 = default).
     """
+    _check_mode(mode)
     rng = np.random.default_rng(seed)
     t = np.arange(1, periods + 1)
 
@@ -87,16 +103,15 @@ def generate_productivity_dataset(periods: int = 52, seed: int = 11, mode: str =
     overtime = 6 + 0.2 * t + rng.normal(0, 1.5, size=periods)
 
     if mode == "gamed":
-        gs = int(periods * 0.45)
-        ge = int(periods * 0.75)
+        gs, ge = gaming_window("productivity", periods)
 
         # KPI spikes (teams optimize throughput)
-        tickets_closed[gs:ge] += np.linspace(0.0, 35.0, ge - gs)
+        tickets_closed[gs:ge] += np.linspace(0.0, 35.0 * intensity, ge - gs)
 
         # quality degrades
-        defects[gs:ge] = defects[gs:ge] + np.linspace(0.0, 10.0, ge - gs) + rng.normal(0, 1.0, ge - gs)
-        reopens[gs:ge] = reopens[gs:ge] + np.linspace(0.0, 8.0, ge - gs) + rng.normal(0, 0.8, ge - gs)
-        overtime[gs:ge] += np.linspace(0.0, 12.0, ge - gs)
+        defects[gs:ge] = defects[gs:ge] + np.linspace(0.0, 10.0 * intensity, ge - gs) + rng.normal(0, 1.0, ge - gs)
+        reopens[gs:ge] = reopens[gs:ge] + np.linspace(0.0, 8.0 * intensity, ge - gs) + rng.normal(0, 0.8, ge - gs)
+        overtime[gs:ge] += np.linspace(0.0, 12.0 * intensity, ge - gs)
 
     defects = np.clip(defects, 0, None)
     reopens = np.clip(reopens, 0, None)
@@ -112,3 +127,30 @@ def generate_productivity_dataset(periods: int = 52, seed: int = 11, mode: str =
         }
     )
     return df
+
+
+def _check_mode(mode: str) -> None:
+    if mode not in {"clean", "gamed"}:
+        raise ValueError(f"mode must be 'clean' or 'gamed', got {mode!r}")
+
+
+SCENARIOS = {
+    "safety": {
+        "generate": generate_safety_dataset,
+        "time_col": "week",
+        "kpi_col": "safety_score",
+        "outcome_col": "incidents",
+        "extra_cols": ["near_misses", "overtime_hours"],
+        "kpi_higher_better": True,
+        "outcome_higher_better": False,
+    },
+    "productivity": {
+        "generate": generate_productivity_dataset,
+        "time_col": "week",
+        "kpi_col": "tickets_closed",
+        "outcome_col": "defects",
+        "extra_cols": ["reopens", "overtime_hours"],
+        "kpi_higher_better": True,
+        "outcome_higher_better": False,
+    },
+}

@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .synthetic import generate_safety_dataset, generate_productivity_dataset
 from .pipeline import run_metricguard
+from .synthetic import generate_productivity_dataset, generate_safety_dataset
 
 
 def main() -> None:
@@ -17,8 +17,12 @@ def main() -> None:
     g.add_argument("--out", type=str, required=True, help="Output CSV path")
     g.add_argument("--periods", type=int, default=52, help="Number of rows/time periods")
     g.add_argument("--seed", type=int, default=7, help="Random seed")
-    g.add_argument("--mode", choices=["clean", "gamed"], default="gamed",
-                   help="clean=healthy metric, gamed=decoupling & contradictions")
+    g.add_argument(
+        "--mode",
+        choices=["clean", "gamed"],
+        default="gamed",
+        help="clean=healthy metric, gamed=decoupling & contradictions",
+    )
 
     # --- run ---
     r = sub.add_parser("run", help="Run MetricGuard analysis on a CSV")
@@ -27,20 +31,44 @@ def main() -> None:
     r.add_argument("--kpi", type=str, required=True, help="KPI column name")
     r.add_argument("--outcome", type=str, required=True, help="Outcome column name")
 
-    r.add_argument("--extras", type=str, nargs="*", default=[],
-                   help="Optional extra columns for contradictions (space-separated)")
+    r.add_argument(
+        "--extras", type=str, nargs="*", default=[], help="Optional extra columns for contradictions (space-separated)"
+    )
 
     r.add_argument("--out", type=str, required=True, help="Output report (.md) path")
     r.add_argument("--window", type=int, default=8, help="Rolling window length")
     r.add_argument("--plot", action="store_true", help="Save plots alongside report")
 
     # Direction flags (this is a big “real product” feature)
-    r.add_argument("--kpi-higher-better", type=str, default="true",
-                   help="true/false: is a higher KPI value better?")
-    r.add_argument("--outcome-higher-better", type=str, default="false",
-                   help="true/false: is a higher outcome value better? (often false, e.g. incidents)")
+    r.add_argument("--kpi-higher-better", type=str, default="true", help="true/false: is a higher KPI value better?")
+    r.add_argument(
+        "--outcome-higher-better",
+        type=str,
+        default="false",
+        help="true/false: is a higher outcome value better? (often false, e.g. incidents)",
+    )
+
+    # --- benchmark ---
+    b = sub.add_parser("benchmark", help="Measure detection accuracy on labeled synthetic data")
+    b.add_argument("--seeds", type=str, default="0:100", help="Seed range as start:stop (default 0:100)")
+    b.add_argument("--periods", type=int, default=52)
+    b.add_argument("--window", type=int, default=8)
+    b.add_argument("--out", type=str, default=None, help="Optional markdown output path")
 
     args = parser.parse_args()
+
+    if args.cmd == "benchmark":
+        from .benchmark import run_benchmark
+
+        start, stop = (int(v) for v in args.seeds.split(":"))
+        result = run_benchmark(seeds=range(start, stop), periods=args.periods, window=args.window)
+        md = result.to_markdown()
+        print(md)
+        if args.out:
+            out_path = Path(args.out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(md, encoding="utf-8")
+        return
 
     if args.cmd == "generate":
         out_path = Path(args.out)

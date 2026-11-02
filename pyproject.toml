@@ -1,6 +1,6 @@
 [project]
 name = "metricguard"
-version = "0.2.0"
+version = "0.3.0"
 description = "Detect KPI gaming, metric drift, and KPI-outcome decoupling over time."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,10 +14,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.5"]
 
 [project.scripts]
 metricguard = "metricguard.cli:main"
 
 [tool.setuptools]
 packages = ["metricguard"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

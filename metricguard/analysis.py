@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -11,10 +10,10 @@ import pandas as pd
 class MetricGuardResult:
     risk_level: str
     risk_score: float
-    key_findings: List[str]
-    signals: Dict[str, float]
+    key_findings: list[str]
+    signals: dict[str, float]
     corr_series: pd.Series
-    suspicious_window: Tuple[int, int] | None  # row indices (start, end)
+    suspicious_window: tuple[int, int] | None  # row indices (start, end)
 
 
 def _risk_bucket(score: float) -> str:
@@ -52,41 +51,73 @@ def _direction_adjust(series: pd.Series, higher_better: bool) -> pd.Series:
     return x if higher_better else -x
 
 
+def _noise_scale(x: pd.Series) -> float:
+    """Robust estimate of step-to-step noise (MAD of first differences, in sigma units).
+
+    Dividing a series by this makes window slopes comparable across KPIs measured in
+    very different units (a 0-1 score vs. hundreds of tickets).
+    """
+    d = np.diff(pd.to_numeric(x, errors="coerce").to_numpy(dtype=float))
+    d = d[~np.isnan(d)]
+    if len(d) == 0:
+        return 1.0
+    mad = 1.4826 * np.median(np.abs(d - np.median(d)))
+    if not np.isfinite(mad) or mad == 0:
+        sd = float(np.std(d))
+        return sd if sd > 0 else 1.0
+    return float(mad)
+
+
+def _standardize(x: pd.Series) -> pd.Series:
+    x = pd.to_numeric(x, errors="coerce").astype(float)
+    return (x - np.nanmedian(x.to_numpy())) / _noise_scale(x)
+
+
+def _excess_slope(x: np.ndarray, i: int, j: int) -> float:
+    """Change over rows [i, j) minus the change expected from the series' overall trend."""
+    span = j - 1 - i
+    global_step = (x[-1] - x[0]) / max(1, len(x) - 1)
+    return float((x[j - 1] - x[i]) - global_step * span)
+
+
 def _find_most_suspicious_window(
     kpi_good: pd.Series,
     out_good: pd.Series,
     window: int,
-) -> Tuple[int, int] | None:
+) -> tuple[tuple[int, int] | None, float]:
     """
-    Find window where KPI (good-direction) increases but outcome (good-direction) decreases/stalls.
-    Returns (start_idx, end_idx) row indices, end exclusive.
+    Find the window where the KPI (good-direction) improves faster than its usual trend
+    while the outcome (good-direction) deteriorates relative to its usual trend.
+
+    Both series are expected in noise-scaled units. Returns ((start, end_exclusive), score),
+    or (None, 0.0) if no window shows that pattern.
     """
     if len(kpi_good) < window + 2:
-        return None
-
-    # Window score: KPI slope positive AND outcome slope negative => suspicious
-    best = None
-    best_score = 0.0
+        return None, 0.0
 
     kg = kpi_good.to_numpy(dtype=float)
     og = out_good.to_numpy(dtype=float)
 
+    best: tuple[int, int] | None = None
+    best_score = 0.0
     for i in range(0, len(kg) - window + 1):
-        a = kg[i:i + window]
-        b = og[i:i + window]
-        if np.any(np.isnan(a)) or np.any(np.isnan(b)):
+        j = i + window
+        if np.any(np.isnan(kg[i:j])) or np.any(np.isnan(og[i:j])):
             continue
-
-        k_slope = float(a[-1] - a[0])
-        o_slope = float(b[-1] - b[0])
-
+        k_excess = _excess_slope(kg, i, j)
+        o_excess = _excess_slope(og, i, j)
         # suspicious when KPI improves (positive) but outcome worsens (negative)
-        score = max(0.0, k_slope) * max(0.0, -o_slope)
+        score = max(0.0, k_excess) * max(0.0, -o_excess)
         if score > best_score:
             best_score = score
-            best = (i, i + window)
+            best = (i, j)
+    return best, best_score
 
-    return best
+
+# Calibration constants. Tuned on held-out calibration seeds (1000-1099) with
+# `python -m metricguard benchmark --seeds 1000:1100`, never on the reported seeds.
+WINDOW_SCORE_SCALE = 15.0  # window score (noise units^2) that maps to full strength
+CONTRADICTION_Z = 1.0  # excess deterioration (noise units) needed to count as a contradiction
 
 
 def analyze_kpi_integrity(
@@ -94,7 +125,7 @@ def analyze_kpi_integrity(
     time_col: str,
     kpi_col: str,
     outcome_col: str,
-    extra_cols: Optional[List[str]] = None,
+    extra_cols: list[str] | None = None,
     window: int = 8,
     kpi_higher_better: bool = True,
     outcome_higher_better: bool = False,
@@ -131,35 +162,30 @@ def analyze_kpi_integrity(
     out_vol = float(np.nanmedian(np.abs(out_chg.values)))
     drift_gap = max(0.0, kpi_vol - out_vol)
 
-    # --- Signal 3: contradictions with extras ---
-    # Convert extras to "good direction" assumption: most extras are “higher is worse”
-    # so we flip them (good direction = -extra)
+    # --- Signal 3: suspicious window (KPI up, outcome down, beyond normal trend) ---
+    kpi_z = _standardize(kpi_good)
+    out_z = _standardize(out_good)
+    suspicious, window_score = _find_most_suspicious_window(kpi_z, out_z, window=window)
+    suspicious_strength = min(1.0, window_score / WINDOW_SCORE_SCALE)
+
+    # --- Signal 4: contradictions with extras inside the suspicious window ---
+    # Extras are assumed "higher is worse" (overtime, reopens, near misses), so their
+    # good direction is the negated series. A contradiction is an extra that worsens
+    # noticeably faster than its own long-run trend while the KPI is being inflated.
     contradiction_hits = 0.0
-    contradiction_notes: List[str] = []
-    k_trend = float(np.nanmean(np.diff(kpi_good.astype(float).values)))
-
-    for col in extra_cols:
-        if col not in d.columns:
-            continue
-        ex_good = _direction_adjust(d[col], higher_better=False)  # treat higher as worse by default
-        e_trend = float(np.nanmean(np.diff(ex_good.astype(float).values)))
-
-        # If KPI trend is improving (k_trend positive), but extra “good direction” trend is negative, that's bad:
-        # (because extra is worsening)
-        if k_trend > 0 and e_trend < 0:
-            contradiction_hits += 1.0
-            contradiction_notes.append(f"- KPI improves while `{col}` worsens (contradiction).")
-
-    contradictions_norm = contradiction_hits / max(1.0, len([c for c in extra_cols if c in d.columns])) if extra_cols else 0.0
-
-    # --- Signal 4: suspicious window existence ---
-    suspicious = _find_most_suspicious_window(kpi_good, out_good, window=window)
-    suspicious_strength = 0.0
+    contradiction_notes: list[str] = []
+    present_extras = [c for c in extra_cols if c in d.columns]
     if suspicious is not None:
         i, j = suspicious
-        k_slope = float(kpi_good.iloc[j - 1] - kpi_good.iloc[i])
-        o_slope = float(out_good.iloc[j - 1] - out_good.iloc[i])
-        suspicious_strength = min(1.0, max(0.0, k_slope) * max(0.0, -o_slope) / 0.5)
+        for col in present_extras:
+            ex_z = _standardize(_direction_adjust(d[col], higher_better=False)).to_numpy(dtype=float)
+            if np.any(np.isnan(ex_z[i:j])):
+                continue
+            if _excess_slope(ex_z, i, j) < -CONTRADICTION_Z:
+                contradiction_hits += 1.0
+                contradiction_notes.append(f"KPI improves while `{col}` worsens faster than its normal trend.")
+
+    contradictions_norm = contradiction_hits / len(present_extras) if present_extras else 0.0
 
     # --- Normalize components into 0..1 ---
     corr_component = min(1.0, corr_decay / 0.35)
@@ -181,11 +207,10 @@ def analyze_kpi_integrity(
     if contradiction_component > 0.4 and window_component > 0.4:
         risk_score = max(risk_score, 0.65)
 
-
     risk_score = float(np.clip(risk_score, 0.0, 1.0))
     risk_level = _risk_bucket(risk_score)
 
-    findings: List[str] = []
+    findings: list[str] = []
     if corr_component > 0.35:
         findings.append(f"KPI–outcome alignment weakened (corr decay ~{corr_decay:.2f}).")
     if instability_component > 0.25:
@@ -197,7 +222,7 @@ def analyze_kpi_integrity(
         findings.extend(contradiction_notes)
     if window_component > 0.25 and suspicious is not None:
         i, j = suspicious
-        findings.append(f"Most suspicious window: rows {i}–{j-1} (KPI improves while outcome worsens).")
+        findings.append(f"Most suspicious window: rows {i}–{j - 1} (KPI improves while outcome worsens).")
 
     if not findings:
         findings.append("No strong KPI integrity issues detected with current thresholds.")
